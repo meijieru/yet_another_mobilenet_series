@@ -24,7 +24,8 @@ def get_block_wrapper(block_str):
                      expand_ratio,
                      kernel_sizes,
                      active_fn=None,
-                     batch_norm_kwargs=None):
+                     batch_norm_kwargs=None,
+                     **kwargs):
 
             def _expand_ratio_to_hiddens(expand_ratio):
                 if isinstance(expand_ratio, list):
@@ -48,7 +49,8 @@ def get_block_wrapper(block_str):
                                  kernel_sizes,
                                  expand,
                                  active_fn=active_fn,
-                                 batch_norm_kwargs=batch_norm_kwargs)
+                                 batch_norm_kwargs=batch_norm_kwargs,
+                                 **kwargs)
             self.expand_ratio = expand_ratio
 
     return InvertedResidual
@@ -104,11 +106,11 @@ class MobileNetV2(nn.Module):
         self.active_fn = active_fn
         self.block = block
 
-        if len(inverted_residual_setting) == 0 or len(
-                inverted_residual_setting[0]) != 5:
-            raise ValueError(
-                "inverted_residual_setting should be non-empty "
-                "or a 5-element list, got {}".format(inverted_residual_setting))
+        if len(inverted_residual_setting) == 0 or (len(
+                inverted_residual_setting[0]) not in [5, 8]):
+            raise ValueError("inverted_residual_setting should be non-empty "
+                             "or a 5/8-element list, got {}".format(
+                                 inverted_residual_setting))
         if input_size % 32 != 0:
             raise ValueError('Input size must divide 32')
         active_fn = get_active_fn(active_fn)
@@ -127,8 +129,13 @@ class MobileNetV2(nn.Module):
                        active_fn=active_fn)
         ]
         # building inverted residual blocks
-        for t, c, n, s, ks in inverted_residual_setting:
+        for t, c, n, s, ks, *extra in inverted_residual_setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
+            _extra_kwargs = {}
+            if len(extra) == 3:
+                _extra_kwargs = {
+                    k: v for k, v in zip(['nl_c', 'nl_s', 'se_ratio'], extra)
+                }
             for i in range(n):
                 stride = s if i == 0 else 1
                 features.append(
@@ -138,7 +145,8 @@ class MobileNetV2(nn.Module):
                           t,
                           ks,
                           active_fn=active_fn,
-                          batch_norm_kwargs=batch_norm_kwargs))
+                          batch_norm_kwargs=batch_norm_kwargs,
+                          **_extra_kwargs))
                 input_channel = output_channel
         # building last several layers
         features.append(

@@ -1,0 +1,14 @@
+_default: !include ../../mobilenet/default_mnas_scheduler.yml
+model: models.mobilenet_supernet
+
+log_dir: ${ARNOLD_OUTPUT}/mobiletnet_v2_nl
+model_kwparams: !include ../models/autonl/autonl_l.yml
+per_gpu_batch_size: 128
+use_distributed: True
+
+# override part of model params
+'model_kwparams.batch_norm_momentum': 0.01
+'model_kwparams.batch_norm_epsilon': 1.0e-3
+
+bn_calibration: True
+bn_calibration_steps: 16

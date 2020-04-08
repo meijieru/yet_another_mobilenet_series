@@ -4,7 +4,6 @@ import numpy as np
 import time
 import torch
 import torch.nn as nn
-import models.mobilenet_supernet as ms
 import models.mobilenet_base as mb
 
 model_profiling_hooks = []
@@ -76,16 +75,16 @@ def module_profiling(self, input, output, verbose):
     # be careful.
     t = type(self)
     if isinstance(self, nn.Conv2d):
-        self.n_macs = (ins[1] * outs[1] * self.kernel_size[0] *
-                       self.kernel_size[1] * outs[2] * outs[3] //
-                       self.groups) * outs[0]
+        self.n_macs = (ins[1] * outs[1] * self.kernel_size[0]
+                       * self.kernel_size[1] * outs[2] * outs[3]
+                       // self.groups) * outs[0]
         self.n_params = get_params(self)
         self.n_seconds = run_forward(self, input)
         self.name = conv_module_name_filter(self.__repr__())
     elif isinstance(self, nn.ConvTranspose2d):
-        self.n_macs = (ins[1] * outs[1] * self.kernel_size[0] *
-                       self.kernel_size[1] * outs[2] * outs[3] //
-                       self.groups) * outs[0]
+        self.n_macs = (ins[1] * outs[1] * self.kernel_size[0]
+                       * self.kernel_size[1] * outs[2] * outs[3]
+                       // self.groups) * outs[0]
         self.n_params = get_params(self)
         self.n_seconds = run_forward(self, input)
         self.name = conv_module_name_filter(self.__repr__())
@@ -105,6 +104,16 @@ def module_profiling(self, input, output, verbose):
         self.n_macs = ins[1] * ins[2] * ins[3] * ins[0]
         self.n_params = 0
         self.n_seconds = run_forward(self, input)
+        self.name = self.__repr__()
+    elif isinstance(self, mb.Nonlocal):
+        n_in, H, W = ins[1], ins[2], ins[3]
+        reduced_HW = (H // self.nl_s) * (W // self.nl_s)
+        self.n_macs = min(
+            (H * W) * reduced_HW * n_in * (1 + self.nl_c),
+            (H * W) * n_in**2 * self.nl_c + reduced_HW * n_in**2 * self.nl_c)
+        self.n_params = 0
+        self.n_seconds = 0
+        add_sub(self, self.depthwise_conv)
         self.name = self.__repr__()
     elif isinstance(self, mb.SqueezeAndExcitation):
         self.n_macs = ins[1] * ins[2] * ins[3] * ins[0]
@@ -129,6 +138,7 @@ def module_profiling(self, input, output, verbose):
         add_sub(self, self.expand_conv)
         add_sub(self, self.project_conv)
         add_sub(self, self.se_op)
+        add_sub(self, self.nl_op)
         self.name = self.__repr__()
     else:
         # This works only in depth-first travel of modules.
@@ -151,21 +161,22 @@ def module_profiling(self, input, output, verbose):
             mb.Swish,
             mb.Narrow,
             mb.Identity,
+            mb.ZeroInitBN,
             nn.MaxPool2d,
             nn.modules.padding.ZeroPad2d,
             nn.modules.activation.Sigmoid,
         ]
-        if (not getattr(self, 'ignore_model_profiling', False) and
-                self.n_macs == 0 and t not in ignore_zeros_t):
+        if (not getattr(self, 'ignore_model_profiling', False)
+                and self.n_macs == 0 and t not in ignore_zeros_t):
             logging.info('WARNING: leaf module {} has zero n_macs.'.format(
                 type(self)))
         return
     if verbose:
         logging.info(
-            self.name.ljust(name_space, ' ') +
-            '{:,}'.format(self.n_params).rjust(params_space, ' ') +
-            '{:,}'.format(self.n_macs).rjust(macs_space, ' ') +
-            '{:,}'.format(self.n_seconds).rjust(seconds_space, ' '))
+            self.name.ljust(name_space, ' ')
+            + '{:,}'.format(self.n_params).rjust(params_space, ' ')
+            + '{:,}'.format(self.n_macs).rjust(macs_space, ' ')
+            + '{:,}'.format(self.n_seconds).rjust(seconds_space, ' '))
     return
 
 
@@ -215,10 +226,10 @@ def model_profiling(model,
     data = data.to(device)
     model.apply(lambda m: add_profiling_hooks(m, verbose=verbose))
     if verbose:
-        logging.info('Item'.ljust(name_space, ' ') +
-                     'params'.rjust(macs_space, ' ') +
-                     'macs'.rjust(macs_space, ' ') +
-                     'nanosecs'.rjust(seconds_space, ' '))
+        logging.info('Item'.ljust(name_space, ' ')
+                     + 'params'.rjust(macs_space, ' ')
+                     + 'macs'.rjust(macs_space, ' ')
+                     + 'nanosecs'.rjust(seconds_space, ' '))
         logging.info(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
     with torch.no_grad():
@@ -226,10 +237,10 @@ def model_profiling(model,
     if verbose:
         logging.info(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
-        logging.info('Total'.ljust(name_space, ' ') +
-                     '{:,}'.format(model.n_params).rjust(params_space, ' ') +
-                     '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
-                     '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
+        logging.info('Total'.ljust(name_space, ' ')
+                     + '{:,}'.format(model.n_params).rjust(params_space, ' ')
+                     + '{:,}'.format(model.n_macs).rjust(macs_space, ' ')
+                     + '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
     remove_profiling_hooks()
     model = model.to(origin_device)
     return model.n_macs, model.n_params

@@ -94,7 +94,10 @@ class SqueezeAndExcitation(nn.Module):
     See: https://arxiv.org/abs/1709.01507
     """
 
-    def __init__(self, n_feature, n_hidden, spatial_dims=[2, 3],
+    def __init__(self,
+                 n_feature,
+                 n_hidden,
+                 spatial_dims=[2, 3],
                  active_fn=None):
         super(SqueezeAndExcitation, self).__init__()
         self.n_feature = n_feature
@@ -113,6 +116,66 @@ class SqueezeAndExcitation(nn.Module):
         return '{}({}, {}, spatial_dims={}, active_fn={})'.format(
             self._get_name(), self.n_feature, self.n_hidden, self.spatial_dims,
             self.active_fn)
+
+
+class ZeroInitBN(nn.BatchNorm2d):
+    """BatchNorm with zero initialization."""
+
+    def reset_parameters(self):
+        self.reset_running_stats()
+        if self.affine:
+            nn.init.zeros_(self.weight)
+            nn.init.zeros_(self.bias)
+
+
+class Nonlocal(nn.Module):
+    """Lightweight Non-Local Module.
+
+    See https://arxiv.org/abs/2004.01961
+    """
+
+    def __init__(self, n_feature, nl_c, nl_s, batch_norm_kwargs=None):
+        super(Nonlocal, self).__init__()
+        self.n_feature = n_feature
+        self.nl_c = nl_c
+        self.nl_s = nl_s
+        self.depthwise_conv = nn.Conv2d(n_feature,
+                                        n_feature,
+                                        3,
+                                        1, (3 - 1) // 2,
+                                        groups=n_feature,
+                                        bias=False)
+
+        if batch_norm_kwargs is None:
+            batch_norm_kwargs = {}
+        from utils.config import FLAGS
+        if hasattr(FLAGS, 'nl_norm'):  # TODO: as param
+            self.bn = get_nl_norm_fn(FLAGS.nl_norm)(n_feature,
+                                                    **batch_norm_kwargs)
+        else:
+            self.bn = ZeroInitBN(n_feature, **batch_norm_kwargs)
+
+    def forward(self, l):
+        N, n_in, H, W = list(l.shape)
+        reduced_HW = (H // self.nl_s) * (W // self.nl_s)
+        l_reduced = l[:, :, ::self.nl_s, ::self.nl_s]
+        theta, phi, g = l[:, :int(self.nl_c * n_in), :, :], l_reduced[:, :int(
+            self.nl_c * n_in), :, :], l_reduced
+        if (H * W) * reduced_HW * n_in * (1 + self.nl_c) < (
+                H * W) * n_in**2 * self.nl_c + reduced_HW * n_in**2 * self.nl_c:
+            f = torch.einsum('niab,nicd->nabcd', theta, phi)
+            f = torch.einsum('nabcd,nicd->niab', f, g)
+        else:
+            f = torch.einsum('nihw,njhw->nij', phi, g)
+            f = torch.einsum('nij,nihw->njhw', f, theta)
+        f = f / H * W
+        f = self.bn(self.depthwise_conv(f))
+        return f + l
+
+    def __repr__(self):
+        return '{}({}, nl_c={}, nl_s={}'.format(self._get_name(),
+                                                self.n_feature, self.nl_c,
+                                                self.nl_s)
 
 
 class ConvBNReLU(nn.Sequential):
@@ -156,7 +219,9 @@ class InvertedResidualChannelsFused(nn.Module):
                  expand,
                  active_fn=None,
                  batch_norm_kwargs=None,
-                 se_ratio=None):
+                 se_ratio=None,
+                 nl_c=0,
+                 nl_s=0):
         super(InvertedResidualChannelsFused, self).__init__()
         assert stride in [1, 2]
         assert len(channels) == len(kernel_sizes)
@@ -171,11 +236,14 @@ class InvertedResidualChannelsFused(nn.Module):
         self.batch_norm_kwargs = batch_norm_kwargs
         self.active_fn = active_fn
         self.se_ratio = se_ratio
+        self.nl_c = nl_c
+        self.nl_s = nl_s
 
-        (self.expand_conv, self.depth_ops, self.project_conv,
-         self.se_op) = self._build(channels, kernel_sizes, expand, se_ratio)
+        (self.expand_conv, self.depth_ops, self.project_conv, self.se_op,
+         self.nl_op) = self._build(channels, kernel_sizes, expand, se_ratio,
+                                   nl_c, nl_s)
 
-    def _build(self, hidden_dims, kernel_sizes, expand, se_ratio):
+    def _build(self, hidden_dims, kernel_sizes, expand, se_ratio, nl_c, nl_s):
         _batch_norm_kwargs = self.batch_norm_kwargs \
             if self.batch_norm_kwargs is not None else {}
 
@@ -220,13 +288,21 @@ class InvertedResidualChannelsFused(nn.Module):
         if expand and narrow_start != hidden_dim_total:
             raise ValueError('Part of expanded are not used')
 
-        if se_ratio is not None:
+        if se_ratio is not None and se_ratio > 0:
             se_op = SqueezeAndExcitation(hidden_dim_total,
                                          int(round(self.input_dim * se_ratio)),
                                          active_fn=self.active_fn)
         else:
             se_op = Identity()
-        return expand_conv, depth_ops, project_conv, se_op
+
+        if nl_c > 0:
+            nl_op = Nonlocal(self.output_dim,
+                             nl_c,
+                             nl_s,
+                             batch_norm_kwargs=_batch_norm_kwargs)
+        else:
+            nl_op = Identity()
+        return expand_conv, depth_ops, project_conv, se_op, nl_op
 
     def get_depthwise_bn(self):
         """Get `[module]` list of BN after depthwise convolution."""
@@ -260,16 +336,17 @@ class InvertedResidualChannelsFused(nn.Module):
             res = res[0]
         res = self.se_op(res)
         res = self.project_conv(res)
+        res = self.nl_op(res)
         if self.use_res_connect:
             return x + res
         return res
 
     def __repr__(self):
         return ('{}({}, {}, channels={}, kernel_sizes={}, expand={}, stride={},'
-                ' se_ratio={})').format(self._get_name(), self.input_dim,
-                                        self.output_dim, self.channels,
-                                        self.kernel_sizes, self.expand,
-                                        self.stride, self.se_ratio)
+                ' se_ratio={}, nl_s={}, nl_c={})').format(
+                    self._get_name(), self.input_dim, self.output_dim,
+                    self.channels, self.kernel_sizes, self.expand, self.stride,
+                    self.se_ratio, self.nl_s, self.nl_c)
 
 
 class InvertedResidualChannels(nn.Module):
@@ -392,6 +469,18 @@ def get_active_fn(name):
     return active_fn
 
 
+def get_nl_norm_fn(name):
+    active_fn = {
+        'nn.BatchNorm':
+            ZeroInitBN,
+        'nn.InstanceNorm':
+            functools.partial(nn.InstanceNorm2d,
+                              affine=True,
+                              track_running_stats=True),
+    }[name]
+    return active_fn
+
+
 def get_block(name):
     """Select building block."""
     return {
@@ -407,8 +496,12 @@ def init_weights_slimmable(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.BatchNorm2d):
-        nn.init.ones_(m.weight)
-        nn.init.zeros_(m.bias)
+        if m.affine:
+            if isinstance(m, ZeroInitBN):
+                nn.init.zeros_(m.weight)
+            else:
+                nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
     elif isinstance(m, nn.Linear):
         nn.init.normal_(m.weight, 0, 0.01)
         nn.init.zeros_(m.bias)
@@ -427,8 +520,16 @@ def init_weights_mnas(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.BatchNorm2d):
-        nn.init.ones_(m.weight)
-        nn.init.zeros_(m.bias)
+        if m.affine:
+            if isinstance(m, ZeroInitBN):
+                nn.init.zeros_(m.weight)
+            else:
+                nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.InstanceNorm2d):
+        if m.affine:
+            nn.init.zeros_(m.weight)
+            nn.init.zeros_(m.bias)
     elif isinstance(m, nn.Linear):
         _, fan_out = nn.init._calculate_fan_in_and_fan_out(m.weight)
         init_range = 1.0 / np.sqrt(fan_out)

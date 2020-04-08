@@ -7,21 +7,27 @@ This repo reproduces some [MobileNetV2](https://arxiv.org/abs/1801.04381)-based 
 
 All of the following models are trained by [MnasNet](https://arxiv.org/abs/1807.11626) training schedule.
 
-|                    | FLOPs | Parameters | Top-1 Report | Top-1 | Top-1 Calib |
-| ---                | ---   | ---        | ---          | ---   | ---         |
-| MobileNetV2        | 300M  | 3.4M       | 72.0         | 73.6  | -           |
-| Proxyless (mobile) | 320M  | 4.1M       | 74.6         | 74.9  | 75.1        |
-| SinglePath         | 334M  | 4.4M       | 75.0         | 75.0  | 75.1        |
-| AtomNAS-A          | 258M  | 3.9M       | -            | -     | 74.6        |
-| AtomNAS-B          | 326M  | 4.4M       | -            | -     | 75.5        |
-| AtomNAS-C          | 360M  | 4.7M       | -            | -     | 75.9        |
-| AtomNAS-A+         | 260M  | 4.7M       | -            | -     | 76.3        |
-| AtomNAS-B+         | 329M  | 5.5M       | -            | -     | 77.2        |
-| AtomNAS-C+         | 363M  | 5.9M       | -            | -     | 77.6        |
+|                      | FLOPs | Parameters | Top-1 Report | Top-1 | Top-1 Calib |
+| ---                  | ---   | ---        | ---          | ---   | ---         |
+| MobileNetV2          | 300M  | 3.4M       | 72.0         | 73.6  | -           |
+| Proxyless (mobile)   | 320M  | 4.1M       | 74.6         | 74.9  | 75.1        |
+| SinglePath           | 334M  | 4.4M       | 75.0         | 75.0  | 75.1        |
+| AtomNAS-A            | 258M  | 3.9M       | -            | -     | 74.6        |
+| AtomNAS-B            | 326M  | 4.4M       | -            | -     | 75.5        |
+| AtomNAS-C            | 360M  | 4.7M       | -            | -     | 75.9        |
+| AtomNAS-A+           | 260M  | 4.7M       | -            | -     | 76.3        |
+| AtomNAS-B+           | 329M  | 5.5M       | -            | -     | 77.2        |
+| AtomNAS-C+           | 363M  | 5.9M       | -            | -     | 77.6        |
+| AutoNL-S             | 267M  | 4.4M       | -            | -     | 76.5        |
+| AutoNL-L<sup>1</sup> | 353M  | 5.6M       | -            | -     | 77.5        |
 
 AtomNAS series comes from our ICLR 2020 paper [AtomNAS: Fine-Grained End-to-End Neural Architecture Search](https://openreview.net/forum?id=BylQSxHFwr) whose code resides in [AtomNAS](https://github.com/meijieru/AtomNAS).
 
+AutoNL series comes from our CVPR 2020 paper [Neural Architecture Search for Lightweight Non-Local Networks](https://arxiv.org/abs/2004.01961), and the original tf version resides in [AutoNL](https://github.com/LiYingwei/AutoNL).
+
 Pretrained Models could be downloaded from [onedrive](https://1drv.ms/u/s!Alk-ml3frR0Iy0ItEpx6KluA6HOD?e=angPfD)
+
+<sup>1</sup> A bit different with tf implementation because of lacking Auto-Augmentation.
 
 ## Setup
 
@@ -62,7 +68,7 @@ bash scripts/run_non_distributed_no_copy.sh ./apps/mobilenet/mobilenet_v2_mnas.y
 
 ## Testing
 
-For MobileNet, Proxyless, SinglePathNAS:
+For MobileNet, Proxyless, SinglePathNAS, AutoNL:
 ```bash
 TRAIN_CONFIG=$(realpath {{train_config_path}}) ATOMNAS_VAL=True bash scripts/run.sh apps/eval/eval.yml --pretrained {{ckpt_path}}
 ```
@@ -119,10 +125,9 @@ If you find this work or code is helpful in your research, please cite:
 ```
 @inproceedings{
     mei2020atomnas,
-    title={Atom{\{}NAS{\}}: Fine-Grained End-to-End Neural Architecture Search},
+    title={Atom{NAS}}: Fine-Grained End-to-End Neural Architecture Search},
     author={Jieru Mei and Yingwei Li and Xiaochen Lian and Xiaojie Jin and Linjie Yang and Alan Yuille and Jianchao Yang},
     booktitle={International Conference on Learning Representations},
     year={2020},
-    url={https://openreview.net/forum?id=BylQSxHFwr}
 }
 ```
